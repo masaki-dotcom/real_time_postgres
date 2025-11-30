@@ -67,6 +67,18 @@ const updateEmail = async () => {
 }
 
 // -------------------------------
+// 削除
+// -------------------------------
+const deleteEmail = async (id) => {
+  console.log(id)
+  if (!confirm("本当に削除しますか？")) return
+
+  await $fetch(`${apiBase}/emails/${id}`, {
+    method: "DELETE",
+  })
+}
+
+// -------------------------------
 // SSE リアルタイム反映
 // -------------------------------
 onMounted(() => {
@@ -113,7 +125,7 @@ onMounted(() => {
         class="bg-green-500 text-white px-4 py-2 rounded"
       >
         更新
-      </button>
+      </button>     
     </div>
 
     <!-- 一覧表示 -->
@@ -139,6 +151,12 @@ onMounted(() => {
             >
               編集
             </button>
+             <button
+                @click="deleteEmail(item.id)"
+                class="bg-red-500 text-white px-3 py-1 rounded"
+              >
+                削除
+              </button>
           </td>
         </tr>
       </tbody>

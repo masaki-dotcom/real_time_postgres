@@ -1,141 +1,98 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 import psycopg2
+from psycopg2.extras import RealDictCursor
 import select
-import atexit
 import json
-import threading
-import queue
-import psycopg2.extras
 
 app = Flask(__name__)
-# CORS(app)  # ←これで全てのオリジンからアクセス可能
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app)
 
+def get_connection():
+    return psycopg2.connect(
+        dbname="app_01",
+        user="postgres",
+        password="tankei001",
+        host="localhost",
+        port="5432"
+    )
 
-# --- DB接続（API用） ---
-api_conn = psycopg2.connect("dbname=app_01 user=postgres password=tankei001 host=localhost")
-api_conn.autocommit = True
+def fetch_emails():
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM emails ORDER BY id;")
+    result = cur.fetchall()
+    cur.close()
+    conn.close()
+    return result
 
-# --- DB接続（SSE用 LISTEN専用） ---
-listen_conn = psycopg2.connect("dbname=app_01 user=postgres password=tankei001 host=localhost")
-listen_conn.autocommit = True
+# SSE用ジェネレーター
+def event_stream():
+    conn = get_connection()
+    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = conn.cursor()
+    cur.execute("LISTEN emails_channel;")  # チャンネルを LISTEN
 
-listen_cur = listen_conn.cursor()
-listen_cur.execute("LISTEN users_events;")
-
-# SSE用キュー
-event_queue = queue.Queue()
-
-
-
-# -------------------------------
-# SSE 用ジェネレーター
-# -------------------------------
-
-# PostgreSQL LISTEN をバックグラウンドで待機するスレッド
-# LISTENスレッド
-def listen_notify():
+    last_data = None
     while True:
-        if select.select([listen_conn], [], [], 5) == ([], [], []):
+        if select.select([conn],[],[],10) == ([],[],[]):  # タイムアウト10秒
             continue
-        listen_conn.poll()
-        while listen_conn.notifies:
-            notify = listen_conn.notifies.pop(0)
-            print("🔔 Notify received:", notify.payload)
-            event_queue.put(notify.payload)
+        conn.poll()
+        while conn.notifies:
+            notify = conn.notifies.pop(0)
+            data = fetch_emails()
+            if data != last_data:
+                last_data = data
+                yield f"data: {json.dumps(data)}\n\n"
 
-thread = threading.Thread(target=listen_notify, daemon=True)
-thread.start()
+@app.route('/emails')
+def get_emails():
+    return jsonify(fetch_emails())
 
+@app.route('/emails/stream')
+def stream_emails():
+    return Response(event_stream(), mimetype="text/event-stream")
 
-# SSE エンドポイント
-@app.get("/events")
-def sse_stream():
-    def event_stream():
-        while True:
-            # 通知が来るまでブロック（待機）
-            payload = event_queue.get()   # timeoutなしです
-            yield f"data: {payload}\n\n"
-
-    headers = {
-        "Cache-Control": "no-cache",
-        "Content-Type": "text/event-stream",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no"
-    }
-
-    return Response(event_stream(), headers=headers)
-
-# ===== REST API =====
-
-@app.get("/users/<int:id>")
-def get_user(id):
-    cur = api_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM users WHERE id=%s", (id,))
-    row = cur.fetchone()
-    cur.close()
-
-    if not row:
-        return jsonify({"error": "not found"}), 404
-    return jsonify(row)
-
-@app.get("/users")
-def get_users():
-    cur = api_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM users ORDER BY id")
-    rows = cur.fetchall()
-    cur.close()
-    return jsonify(rows)
-
-
-@app.post("/users")
-def create_user():
-    data = request.json
-    cur = api_conn.cursor()
+@app.route('/emails', methods=['POST'])
+def add_email():
+    payload = request.json
+    conn = get_connection()
+    cur = conn.cursor()
     cur.execute(
-        "INSERT INTO users (name, email) VALUES (%s, %s) RETURNING id",
-        (data["name"], data["email"])
+        "INSERT INTO emails (name,email) VALUES (%s,%s)",
+        (payload['name'], payload['email'])
     )
-    new_id = cur.fetchone()[0]
+    conn.commit()
     cur.close()
-    return jsonify({"id": new_id})
+    conn.close()
+    return jsonify({"status": "ok"}), 201
 
 
-@app.put("/users/<int:id>")
-def update_user(id):
-    data = request.json
-    cur = api_conn.cursor()
+##更新
+@app.route('/emails/<int:id>', methods=['PUT'])
+def update_email(id):
+    payload = request.json
+    conn = get_connection()
+    cur = conn.cursor()
     cur.execute(
-        "UPDATE users SET name=%s, email=%s WHERE id=%s",
-        (data["name"], data["email"], id)
+        "UPDATE emails SET name=%s, email=%s WHERE id=%s",
+        (payload.get('name'), payload.get('email'), id)
     )
+    conn.commit()
     cur.close()
+    conn.close()
     return jsonify({"status": "ok"})
 
-
-# -------------------------------
-# アプリ終了時に接続を閉じる
-# -------------------------------
-def cleanup():
-    print("Closing PostgreSQL connections...")
-
-    # API 用接続
-    try:      
-        api_conn.close()
-        print("API connection closed")
-    except Exception as e:
-        print("Error closing API connection:", e)
-
-    # SSE 用接続
-    try:
-        listen_cur.close()
-        listen_conn.close()
-        print("SSE connection closed")
-    except Exception as e:
-        print("Error closing SSE connection:", e)
-
-atexit.register(cleanup)
+#削除
+@app.route('/emails/<int:id>', methods=['DELETE'])
+def delete_email(id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM emails WHERE id=%s", (id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="localhost", port=5001, threaded=True, debug=True)
+    app.run(host="localhost", port=5000, threaded=True, debug=True)
