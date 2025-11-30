@@ -67,5 +67,21 @@ def add_email():
     conn.close()
     return jsonify({"status": "ok"}), 201
 
+
+##更新
+@app.route('/emails/<int:id>', methods=['PUT'])
+def update_email(id):
+    payload = request.json
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE emails SET name=%s, email=%s WHERE id=%s",
+        (payload.get('name'), payload.get('email'), id)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"status": "ok"})
+
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, threaded=True, debug=True)
