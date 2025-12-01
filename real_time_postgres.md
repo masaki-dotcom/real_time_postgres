@@ -45,6 +45,13 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER emails_notify_trigger
 AFTER INSERT OR UPDATE OR DELETE ON emails
 FOR EACH ROW EXECUTE FUNCTION notify_email_change();
+
+
+
+---PostgreSQL 10 用
+CREATE TRIGGER emails_notify_trigger
+AFTER INSERT OR UPDATE OR DELETE ON emails
+FOR EACH ROW EXECUTE PROCEDURE notify_email_change();
 ```  
 
 ```
