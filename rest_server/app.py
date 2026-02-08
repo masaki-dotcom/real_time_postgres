@@ -1,12 +1,216 @@
-from flask import Flask, Response, request, jsonify
+from flask import Flask, Response, request, jsonify ,send_file
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import select
 import json
 
+import cv2
+import numpy as np
+import onnxruntime as ort
+import io
+import base64
+
+
 app = Flask(__name__)
 CORS(app)
+
+# =====================
+# モデル設定
+# =====================
+MODEL_PATH = "best.onnx"
+INPUT_SIZE = 1280
+NAMES = ["pipe", "muku"]
+
+# =====================
+# ONNX Runtime
+# =====================
+sess = ort.InferenceSession(
+    MODEL_PATH,
+    providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+)
+input_name = sess.get_inputs()[0].name
+
+print("ONNX input:", input_name)
+# =====================
+# 前処理
+# =====================
+def preprocess(img):
+    h, w = img.shape[:2]
+
+    img_resized = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE))
+    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+    img_rgb = img_rgb.astype(np.float32) / 255.0
+
+    img_chw = np.transpose(img_rgb, (2, 0, 1))
+    blob = np.expand_dims(img_chw, axis=0)
+
+    return blob, w, h
+
+
+
+# =====================
+# 推論API
+# =====================
+@app.route("/predict", methods=["POST"])
+def predict():
+
+    if "image" not in request.files:
+        return jsonify({"error": "no image"}), 400
+
+    # --------------------
+    # 画像読み込み
+    # --------------------
+    file = request.files["image"]
+    img_bytes = file.read()
+
+    img_np = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+
+    if img is None:
+        return jsonify({"error": "invalid image"}), 400
+
+    orig_h, orig_w = img.shape[:2]
+
+    # --------------------
+    # ROI 座標取得（Nuxtから）
+    # --------------------
+    try:
+        x1 = int(request.form.get("x1"))
+        y1 = int(request.form.get("y1"))
+        x2 = int(request.form.get("x2"))
+        y2 = int(request.form.get("y2"))
+    except:
+        return jsonify({"error": "invalid roi"}), 400
+
+    # 座標補正
+    x1, x2 = sorted([x1, x2])
+    y1, y2 = sorted([y1, y2])
+
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(orig_w, x2)
+    y2 = min(orig_h, y2)
+
+    if x2 <= x1 or y2 <= y1:
+        return jsonify({"error": "empty roi"}), 400
+
+    # --------------------
+    # ROI 切り出し
+    # --------------------
+    roi_img = img[y1:y2, x1:x2]
+    roi_h, roi_w = roi_img.shape[:2]
+
+    # --------------------
+    # 前処理
+    # --------------------
+    blob, _, _ = preprocess(roi_img)
+    scale_x = roi_w / INPUT_SIZE
+    scale_y = roi_h / INPUT_SIZE
+
+    print("blob:", blob.shape)
+
+    # --------------------
+    # 推論
+    # --------------------
+    outputs = sess.run(None, {input_name: blob})
+    preds = outputs[0][0]   # (6, 33600)
+
+    print("outputs[0].shape =", outputs[0].shape)
+
+    boxes = []
+    scores = []
+    class_ids = []
+
+    # --------------------
+    # 後処理（YOLOv8 ONNX 正式）
+    # --------------------
+    for i in range(preds.shape[1]):
+        xc, yc, bw, bh = preds[0:4, i]
+
+        class_scores = preds[4:, i]
+        cls = int(np.argmax(class_scores))
+        score = float(class_scores[cls])
+
+        if score < 0.3:
+            continue
+
+        # center → corner（ROI基準）
+        x = int((xc - bw / 2) * scale_x)
+        y = int((yc - bh / 2) * scale_y)
+        w = int(bw * scale_x)
+        h = int(bh * scale_y)
+
+        # clamp
+        x = max(0, x)
+        y = max(0, y)
+        w = min(roi_w - x, w)
+        h = min(roi_h - y, h)
+
+        boxes.append([x, y, w, h])
+        scores.append(score)
+        class_ids.append(cls)
+
+    print("boxes:", len(boxes))
+    if scores:
+        print("scores min/max:", min(scores), max(scores))
+
+    img_draw = roi_img.copy()
+
+    # --------------------
+    # NMS
+    # --------------------
+    indices = cv2.dnn.NMSBoxes(
+        boxes,
+        scores,
+        score_threshold=0.5,
+        nms_threshold=0.5
+    )
+
+    if len(indices) == 0:
+        print("NMS: no boxes")
+        _, buf = cv2.imencode(".jpg", img_draw)
+        return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+    # --------------------
+    # 描画（ROI画像上）
+    # --------------------
+    for i in indices.flatten():
+        x, y, w, h = boxes[i]
+        cls = class_ids[i]
+        score = scores[i]
+
+        cv2.rectangle(
+            img_draw,
+            (x, y),
+            (x + w, y + h),
+            (0, 255, 0),
+            2
+        )
+
+        label = f"{NAMES[cls]} {score*100:.2f}%"
+        cv2.putText(
+            img_draw,
+            label,
+            (x, max(20, y - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
+
+        print("DRAW:", NAMES[cls], score, x, y, x + w, y + h)
+
+    # --------------------
+    # ROI画像を返却
+    # --------------------
+    _, buf = cv2.imencode(".jpg", img_draw)
+    return send_file(
+        io.BytesIO(buf.tobytes()),
+        mimetype="image/jpeg"
+    )
+
+
 
 def get_connection():
     return psycopg2.connect(
