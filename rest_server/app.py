@@ -58,6 +58,10 @@ def predict():
 
     if "image" not in request.files:
         return jsonify({"error": "no image"}), 400
+    
+    # 表示対象クラス（Nuxtから）
+    display_classes = request.form.getlist("classes[]")
+    print("display_classes:", display_classes)
 
     # --------------------
     # 画像読み込み
@@ -181,38 +185,41 @@ def predict():
             else:
                 color = (0, 255, 0)
 
-            # 緑の検出枠
-            # cv2.rectangle(
-            #     img_draw,
-            #     (x, y),
-            #     (x + w_box, y + h_box),
-            #     (0, 255, 0),
-            #     2
-            # )
+            if "Box"  in display_classes:
+                #緑の検出枠
+                cv2.rectangle(
+                    img_draw,
+                    (x, y),
+                    (x + w_box, y + h_box),
+                    (0, 255, 0),
+                    2
+                )
+            if "Label"  in display_classes:
+                # ラベル
+                label = f"{NAMES[cls]} {score*100:.1f}%"
+                cv2.putText(
+                    img_draw,
+                    label,
+                    (x, max(20, y - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
 
-            # ラベル
-            # label = f"{NAMES[cls]} {score*100:.1f}%"
-            # cv2.putText(
-            #     img_draw,
-            #     label,
-            #     (x, max(20, y - 5)),
-            #     cv2.FONT_HERSHEY_SIMPLEX,
-            #     0.6,
-            #     (0, 255, 0),
-            #     2
-            # )
+            if len(display_classes)==0:
 
-            # 中心点（●）
-            cx = x + w_box // 2
-            cy = y + h_box // 2
+                # 中心点（●）
+                cx = x + w_box // 2
+                cy = y + h_box // 2
 
-            cv2.circle(
-                img_draw,
-                (cx, cy),
-                5,              # 半径（好みで3〜8）
-                color,    # 色（緑）
-                -1              # 塗りつぶし
-            )
+                cv2.circle(
+                    img_draw,
+                    (cx, cy),
+                    5,              # 半径（好みで3〜8）
+                    color,    # 色（緑）
+                    -1              # 塗りつぶし
+                )
 
     # --------------------
     # ROI外周を赤枠で描画（最後に）
@@ -234,7 +241,7 @@ def predict():
     #     io.BytesIO(buf.tobytes()),
     #     mimetype="image/jpeg"
     # )
-    print(counts)
+    #     
     _, buf = cv2.imencode(".jpg", img_draw)
     img_base64 = base64.b64encode(buf).decode("utf-8")
 

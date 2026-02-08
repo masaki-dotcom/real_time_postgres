@@ -1,7 +1,7 @@
 <template>
   <input type="file" @change="onFile" />
-  <label><input type="checkbox" v-model="pipe" /> pipe</label>
-  <label><input type="checkbox" v-model="muku" /> muku</label>
+  <label><input type="checkbox" v-model="Box" /> Box</label>
+  <label><input type="checkbox" v-model="Label" /> Label</label>
   <button class="but" @click="send">推論</button>
 
   <div style="margin-top:8px">
@@ -30,8 +30,8 @@ const scale = ref(1)
 const start = ref(null)
 const roi = ref(null)
 
-const pipe = ref(true)
-const muku = ref(true)
+const Box = ref(true)
+const Label = ref(true)
 
 const counts = ref({ pipe: 0, muku: 0 })
 
@@ -115,8 +115,8 @@ const send = async () => {
   fd.append("x2", sendRoi.x2)
   fd.append("y2", sendRoi.y2)
 
-  if (pipe.value) fd.append("classes[]", "pipe")
-  if (muku.value) fd.append("classes[]", "muku")
+  if (Box.value) fd.append("classes[]", "Box")
+  if (Label.value) fd.append("classes[]", "Label")
 
   const res = await fetch("http://localhost:5000/predict", {
     method: "POST",
