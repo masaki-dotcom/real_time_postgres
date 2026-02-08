@@ -3,6 +3,12 @@
   <label><input type="checkbox" v-model="pipe" /> pipe</label>
   <label><input type="checkbox" v-model="muku" /> muku</label>
   <button class="but" @click="send">推論</button>
+
+  <div style="margin-top:8px">
+    pipe: {{ counts.pipe }}　
+    muku: {{ counts.muku }}
+  </div>
+
   <br />
   <canvas
     ref="canvas"
@@ -27,6 +33,8 @@ const roi = ref(null)
 const pipe = ref(true)
 const muku = ref(true)
 
+const counts = ref({ pipe: 0, muku: 0 })
+
 const MAX_SIZE = 1400
 
 // --------------------
@@ -34,7 +42,6 @@ const MAX_SIZE = 1400
 // --------------------
 const onFile = e => {
   imageFile.value = e.target.files[0]
-  // ★ ROIをリセット
   roi.value = null
   start.value = null
 
@@ -50,13 +57,7 @@ const onFile = e => {
 
     ctx.value = canvas.value.getContext("2d")
     ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
-    ctx.value.drawImage(
-      imgObj.value,
-      0,
-      0,
-      canvas.value.width,
-      canvas.value.height
-    )
+    ctx.value.drawImage(imgObj.value, 0, 0, canvas.value.width, canvas.value.height)
   }
 
   imgObj.value.src = URL.createObjectURL(imageFile.value)
@@ -79,14 +80,7 @@ const mouseUp = e => {
     y2: Math.max(start.value.y, e.offsetY)
   }
 
-  // 再描画
-  ctx.value.drawImage(
-    imgObj.value,
-    0,
-    0,
-    canvas.value.width,
-    canvas.value.height
-  )
+  ctx.value.drawImage(imgObj.value, 0, 0, canvas.value.width, canvas.value.height)
 
   ctx.value.strokeStyle = "lime"
   ctx.value.lineWidth = 2
@@ -107,14 +101,19 @@ const send = async () => {
     return
   }
 
+  const sendRoi = {
+    x1: Math.round(roi.value.x1 / scale.value),
+    y1: Math.round(roi.value.y1 / scale.value),
+    x2: Math.round(roi.value.x2 / scale.value),
+    y2: Math.round(roi.value.y2 / scale.value)
+  }
+
   const fd = new FormData()
   fd.append("image", imageFile.value)
-
-  // ★ 表示 → 元画像座標に戻す
-  fd.append("x1", Math.round(roi.value.x1 / scale.value))
-  fd.append("y1", Math.round(roi.value.y1 / scale.value))
-  fd.append("x2", Math.round(roi.value.x2 / scale.value))
-  fd.append("y2", Math.round(roi.value.y2 / scale.value))
+  fd.append("x1", sendRoi.x1)
+  fd.append("y1", sendRoi.y1)
+  fd.append("x2", sendRoi.x2)
+  fd.append("y2", sendRoi.y2)
 
   if (pipe.value) fd.append("classes[]", "pipe")
   if (muku.value) fd.append("classes[]", "muku")
@@ -124,9 +123,14 @@ const send = async () => {
     body: fd
   })
 
-  const blob = await res.blob()
-  const img = new Image()
+  const data = await res.json()
 
+  // 🔢 cls個数
+  counts.value.pipe = data.counts.pipe ?? 0
+  counts.value.muku = data.counts.muku ?? 0
+
+  // 🖼 base64画像描画
+  const img = new Image()
   img.onload = () => {
     canvas.value.width = img.width
     canvas.value.height = img.height
@@ -134,7 +138,7 @@ const send = async () => {
     ctx.value.drawImage(img, 0, 0)
   }
 
-  img.src = URL.createObjectURL(blob)
+  img.src = "data:image/jpeg;base64," + data.image
 }
 </script>
 

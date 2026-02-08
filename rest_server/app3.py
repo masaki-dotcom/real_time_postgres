@@ -9,7 +9,6 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import io
-from collections import defaultdict
 import base64
 
 
@@ -72,9 +71,11 @@ def predict():
         return jsonify({"error": "invalid image"}), 400
 
     orig_h, orig_w = img.shape[:2]
+    print("=== Flask: original image ===")
+    print("image size:", orig_w, orig_h)
 
     # --------------------
-    # ROI 座標取得
+    # ROI 座標（Nuxtから）
     # --------------------
     try:
         x1 = int(request.form.get("x1"))
@@ -84,7 +85,6 @@ def predict():
     except:
         return jsonify({"error": "invalid roi"}), 400
 
-    # 座標補正
     x1, x2 = sorted([x1, x2])
     y1, y2 = sorted([y1, y2])
 
@@ -93,16 +93,20 @@ def predict():
     x2 = min(orig_w, x2)
     y2 = min(orig_h, y2)
 
-    print("roi:", x1, y1, x2, y2)
-
     if x2 <= x1 or y2 <= y1:
         return jsonify({"error": "empty roi"}), 400
+
+    roi_w = x2 - x1
+    roi_h = y2 - y1
+
+    print("=== Flask: ROI received ===")
+    print("roi:", x1, y1, x2, y2)
+    print("roi size:", roi_w, roi_h)
 
     # --------------------
     # ROI 切り出し
     # --------------------
     roi_img = img[y1:y2, x1:x2].copy()
-    roi_h, roi_w = roi_img.shape[:2]
 
     # --------------------
     # 前処理
@@ -111,11 +115,15 @@ def predict():
     scale_x = roi_w / INPUT_SIZE
     scale_y = roi_h / INPUT_SIZE
 
+    print("=== Flask: preprocess ===")
+    print("YOLO input size:", INPUT_SIZE, INPUT_SIZE)
+    print("scale_x:", scale_x, "scale_y:", scale_y)
+
     # --------------------
     # 推論
     # --------------------
     outputs = sess.run(None, {input_name: blob})
-    preds = outputs[0][0]   # (C, N)
+    preds = outputs[0][0]  # (C, N)
 
     boxes = []
     scores = []
@@ -131,20 +139,25 @@ def predict():
         if score < 0.3:
             continue
 
-        # ROI基準
-        x = int((xc - bw / 2) * scale_x)
-        y = int((yc - bh / 2) * scale_y)
-        w_box = int(bw * scale_x)
-        h_box = int(bh * scale_y)
+        # ROI基準 bbox
+        x = (xc - bw / 2) * scale_x
+        y = (yc - bh / 2) * scale_y
+        w_box = bw * scale_x
+        h_box = bh * scale_y
 
-        x = max(0, x)
-        y = max(0, y)
-        w_box = min(roi_w - x, w_box)
-        h_box = min(roi_h - y, h_box)
+        # 元画像座標へ変換 ★超重要
+        x = int(x + x1)
+        y = int(y + y1)
+        w_box = int(w_box)
+        h_box = int(h_box)
 
         boxes.append([x, y, w_box, h_box])
         scores.append(score)
         class_ids.append(cls)
+
+    print("boxes:", len(boxes))
+    if scores:
+        print("scores min/max:", min(scores), max(scores))
 
     # --------------------
     # NMS
@@ -152,96 +165,50 @@ def predict():
     indices = cv2.dnn.NMSBoxes(
         boxes,
         scores,
-        score_threshold=0.5,
+        score_threshold=0.3,
         nms_threshold=0.5
     )
 
-    # --------------------
-    # 描画用画像（ROIのみ）
-    # --------------------
-    img_draw = roi_img.copy()
-    counts = defaultdict(int)#クラスの辞書を作成
+    img_draw = img.copy()
 
     # --------------------
-    # 推論結果（緑box + label）
+    # 元画像に描画
     # --------------------
     if len(indices) > 0:
         for i in indices.flatten():
             x, y, w_box, h_box = boxes[i]
             cls = class_ids[i]
             score = scores[i]
-            #クラスの個数を辞書に変換
-            class_name = NAMES[cls]
-            counts[class_name] += 1
 
-            if cls == 0:        # pipe
-                color = (0, 0, 255)
-            elif cls == 1:      # muku
-                color = (255, 0, 0)
-            else:
-                color = (0, 255, 0)
-
-            # 緑の検出枠
-            # cv2.rectangle(
-            #     img_draw,
-            #     (x, y),
-            #     (x + w_box, y + h_box),
-            #     (0, 255, 0),
-            #     2
-            # )
-
-            # ラベル
-            # label = f"{NAMES[cls]} {score*100:.1f}%"
-            # cv2.putText(
-            #     img_draw,
-            #     label,
-            #     (x, max(20, y - 5)),
-            #     cv2.FONT_HERSHEY_SIMPLEX,
-            #     0.6,
-            #     (0, 255, 0),
-            #     2
-            # )
-
-            # 中心点（●）
-            cx = x + w_box // 2
-            cy = y + h_box // 2
-
-            cv2.circle(
+            cv2.rectangle(
                 img_draw,
-                (cx, cy),
-                5,              # 半径（好みで3〜8）
-                color,    # 色（緑）
-                -1              # 塗りつぶし
+                (x, y),
+                (x + w_box, y + h_box),
+                (0, 255, 0),
+                2
             )
 
-    # --------------------
-    # ROI外周を赤枠で描画（最後に）
-    # --------------------
-    # cv2.rectangle(
-    #     img_draw,
-    #     (0, 0),
-    #     (roi_w - 1, roi_h - 1),
-    #     (0, 0, 255),  # 赤
-    #     2
-    # )
+            label = f"{NAMES[cls]} {score*100:.1f}%"
+            cv2.putText(
+                img_draw,
+                label,
+                (x, max(20, y - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
 
+            print("DRAW:", NAMES[cls], score, x, y, x + w_box, y + h_box)
 
     # --------------------
     # 元画像サイズで返却
     # --------------------
-    # _, buf = cv2.imencode(".jpg", img_draw)
-    # return send_file(
-    #     io.BytesIO(buf.tobytes()),
-    #     mimetype="image/jpeg"
-    # )
-    print(counts)
     _, buf = cv2.imencode(".jpg", img_draw)
-    img_base64 = base64.b64encode(buf).decode("utf-8")
-
-    return jsonify({
-        "counts": counts,          # ← ★ clsごとの個数
-        "image": img_base64,       # ← ★ 表示用画像
-    })
+    return send_file(
+        io.BytesIO(buf.tobytes()),
+        mimetype="image/jpeg"
+    )
 
 
 
