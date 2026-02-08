@@ -70,10 +70,8 @@ def predict():
     if img is None:
         return jsonify({"error": "invalid image"}), 400
 
-    orig_h, orig_w = img.shape[:2]
-
     # --------------------
-    # ROI 座標取得（Nuxtから）
+    # ROI 座標
     # --------------------
     try:
         x1 = int(request.form.get("x1"))
@@ -83,14 +81,15 @@ def predict():
     except:
         return jsonify({"error": "invalid roi"}), 400
 
-    # 座標補正
+    h, w = img.shape[:2]
+
     x1, x2 = sorted([x1, x2])
     y1, y2 = sorted([y1, y2])
 
     x1 = max(0, x1)
     y1 = max(0, y1)
-    x2 = min(orig_w, x2)
-    y2 = min(orig_h, y2)
+    x2 = min(w, x2)
+    y2 = min(h, y2)
 
     if x2 <= x1 or y2 <= y1:
         return jsonify({"error": "empty roi"}), 400
@@ -98,7 +97,7 @@ def predict():
     # --------------------
     # ROI 切り出し
     # --------------------
-    roi_img = img[y1:y2, x1:x2]
+    roi_img = img[y1:y2, x1:x2].copy()
     roi_h, roi_w = roi_img.shape[:2]
 
     # --------------------
@@ -108,54 +107,39 @@ def predict():
     scale_x = roi_w / INPUT_SIZE
     scale_y = roi_h / INPUT_SIZE
 
-    print("blob:", blob.shape)
-
     # --------------------
     # 推論
     # --------------------
     outputs = sess.run(None, {input_name: blob})
-    preds = outputs[0][0]   # (6, 33600)
-
-    print("outputs[0].shape =", outputs[0].shape)
+    preds = outputs[0][0]  # (C, N)
 
     boxes = []
     scores = []
     class_ids = []
 
-    # --------------------
-    # 後処理（YOLOv8 ONNX 正式）
-    # --------------------
     for i in range(preds.shape[1]):
         xc, yc, bw, bh = preds[0:4, i]
-
         class_scores = preds[4:, i]
+
         cls = int(np.argmax(class_scores))
         score = float(class_scores[cls])
 
         if score < 0.3:
             continue
 
-        # center → corner（ROI基準）
         x = int((xc - bw / 2) * scale_x)
         y = int((yc - bh / 2) * scale_y)
-        w = int(bw * scale_x)
-        h = int(bh * scale_y)
+        w_box = int(bw * scale_x)
+        h_box = int(bh * scale_y)
 
-        # clamp
         x = max(0, x)
         y = max(0, y)
-        w = min(roi_w - x, w)
-        h = min(roi_h - y, h)
+        w_box = min(roi_w - x, w_box)
+        h_box = min(roi_h - y, h_box)
 
-        boxes.append([x, y, w, h])
+        boxes.append([x, y, w_box, h_box])
         scores.append(score)
         class_ids.append(cls)
-
-    print("boxes:", len(boxes))
-    if scores:
-        print("scores min/max:", min(scores), max(scores))
-
-    img_draw = roi_img.copy()
 
     # --------------------
     # NMS
@@ -167,42 +151,35 @@ def predict():
         nms_threshold=0.5
     )
 
-    if len(indices) == 0:
-        print("NMS: no boxes")
-        _, buf = cv2.imencode(".jpg", img_draw)
-        return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+    img_draw = roi_img.copy()
+
+    if len(indices) > 0:
+        for i in indices.flatten():
+            x, y, w_box, h_box = boxes[i]
+            cls = class_ids[i]
+            score = scores[i]
+
+            cv2.rectangle(
+                img_draw,
+                (x, y),
+                (x + w_box, y + h_box),
+                (0, 255, 0),
+                2
+            )
+
+            label = f"{NAMES[cls]} {score*100:.1f}%"
+            cv2.putText(
+                img_draw,
+                label,
+                (x, max(20, y - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
 
     # --------------------
-    # 描画（ROI画像上）
-    # --------------------
-    for i in indices.flatten():
-        x, y, w, h = boxes[i]
-        cls = class_ids[i]
-        score = scores[i]
-
-        cv2.rectangle(
-            img_draw,
-            (x, y),
-            (x + w, y + h),
-            (0, 255, 0),
-            2
-        )
-
-        label = f"{NAMES[cls]} {score*100:.2f}%"
-        cv2.putText(
-            img_draw,
-            label,
-            (x, max(20, y - 5)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2
-        )
-
-        print("DRAW:", NAMES[cls], score, x, y, x + w, y + h)
-
-    # --------------------
-    # ROI画像を返却
+    # ROI画像のみ返却
     # --------------------
     _, buf = cv2.imencode(".jpg", img_draw)
     return send_file(
