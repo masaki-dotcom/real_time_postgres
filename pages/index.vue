@@ -94,7 +94,7 @@ onMounted(() => {
 
 <template>
   <div class="p-5">
-    <h1 class="text-2xl font-bold mb-4">リアルタイム Email 管理</h1>
+    <h1 class="text-4xl font-bold mb-4">リアルタイム Email 管理</h1>
 
     <!-- 入力フォーム -->
     <div class="border p-4 rounded mb-6">
@@ -114,7 +114,7 @@ onMounted(() => {
       <button
         v-if="!editingId"
         @click="addEmail"
-        class="bg-blue-500 text-white px-4 py-2 rounded"
+        class="bg-blue-500 text-white px-4 py-2 rounded ml-2"
       >
         追加
       </button>
@@ -131,7 +131,7 @@ onMounted(() => {
     <!-- 一覧表示 -->
     <table class="w-full border">
       <thead>
-        <tr class="bg-gray-200">
+        <tr class="bg-gray-300">
           <th class="border p-2">ID</th>
           <th class="border p-2">名前</th>
           <th class="border p-2">メール</th>
