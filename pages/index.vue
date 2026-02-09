@@ -176,8 +176,10 @@ const send = async () => {
   // ★ 別ウインドウ表示
   // --------------------
   if (!resultWindow || resultWindow.closed) {
-    resultWindow = window.open("", "resultWindow", "width=800,height=600")
+    resultWindow = window.open("", "resultWindow", "width=900,height=700")
   }
+  // ★ 重要：必ずフォーカス
+  resultWindow.focus()
 
   resultWindow.document.open()
   resultWindow.document.write(`

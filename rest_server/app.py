@@ -187,6 +187,16 @@ def predict():
     img_draw = roi_img.copy()
     counts = defaultdict(int)
 
+    #文字、丸のサイズ設定--------------
+    h, w = img_draw.shape[:2]
+    scale = max(w, h) / 640.0
+
+    font_scale = 0.6 * scale
+    font_thickness = max(1, int(2 * scale*0.8))
+    box_thickness = max(1, int(2 * scale))
+    circle_radius = max(3, int(5 * scale))
+    #--------------------------------
+
     if len(indices) > 0:
         for i in indices.flatten():
             x, y, w_box, h_box = boxes[i]
@@ -198,31 +208,47 @@ def predict():
 
             color = (0, 0, 255) if cls == 0 else (255, 0, 0)
 
+            # --------------------
+            # Box
+            # --------------------
             if "Box" in display_classes:
                 cv2.rectangle(
                     img_draw,
                     (x, y),
                     (x + w_box, y + h_box),
                     (0, 255, 0),
-                    2
+                    box_thickness
                 )
 
+            # --------------------
+            # Label
+            # --------------------
             if "Label" in display_classes:
                 label = f"{class_name} {score*100:.1f}%"
                 cv2.putText(
                     img_draw,
                     label,
-                    (x, max(20, y - 5)),
+                    (x, max(int(20 * scale), y - int(5 * scale))),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
+                    font_scale,
                     (0, 255, 0),
-                    2
+                    font_thickness,
+                    cv2.LINE_AA
                 )
 
+            # --------------------
+            # Center circle
+            # --------------------
             if len(display_classes) == 0:
                 cx = x + w_box // 2
                 cy = y + h_box // 2
-                cv2.circle(img_draw, (cx, cy), 5, color, -1)
+                cv2.circle(
+                    img_draw,
+                    (cx, cy),
+                    circle_radius,
+                    color,
+                    -1
+                )
 
     # --------------------
     # 返却
