@@ -13,6 +13,7 @@
   <canvas
     ref="canvas"
     @mousedown="mouseDown"
+    @mousemove="mouseMove"
     @mouseup="mouseUp"
   ></canvas>
 </template>
@@ -29,6 +30,7 @@ const scale = ref(1)
 
 const start = ref(null)
 const roi = ref(null)
+const isDragging = ref(false)
 
 const Box = ref(true)
 const Label = ref(true)
@@ -44,6 +46,7 @@ const onFile = e => {
   imageFile.value = e.target.files[0]
   roi.value = null
   start.value = null
+  isDragging.value = false
 
   imgObj.value = new Image()
   imgObj.value.onload = () => {
@@ -57,7 +60,13 @@ const onFile = e => {
 
     ctx.value = canvas.value.getContext("2d")
     ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
-    ctx.value.drawImage(imgObj.value, 0, 0, canvas.value.width, canvas.value.height)
+    ctx.value.drawImage(
+      imgObj.value,
+      0,
+      0,
+      canvas.value.width,
+      canvas.value.height
+    )
   }
 
   imgObj.value.src = URL.createObjectURL(imageFile.value)
@@ -68,10 +77,42 @@ const onFile = e => {
 // --------------------
 const mouseDown = e => {
   start.value = { x: e.offsetX, y: e.offsetY }
+  isDragging.value = true
+}
+
+const mouseMove = e => {
+  if (!isDragging.value || !start.value) return
+
+  const x1 = start.value.x
+  const y1 = start.value.y
+  const x2 = e.offsetX
+  const y2 = e.offsetY
+
+  // 元画像を描き直し
+  ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+  ctx.value.drawImage(
+    imgObj.value,
+    0,
+    0,
+    canvas.value.width,
+    canvas.value.height
+  )
+
+  // ドラッグ中ROI表示
+  ctx.value.strokeStyle = "lime"
+  ctx.value.lineWidth = 2
+  ctx.value.strokeRect(
+    Math.min(x1, x2),
+    Math.min(y1, y2),
+    Math.abs(x2 - x1),
+    Math.abs(y2 - y1)
+  )
 }
 
 const mouseUp = e => {
   if (!start.value) return
+
+  isDragging.value = false
 
   roi.value = {
     x1: Math.min(start.value.x, e.offsetX),
@@ -80,7 +121,15 @@ const mouseUp = e => {
     y2: Math.max(start.value.y, e.offsetY)
   }
 
-  ctx.value.drawImage(imgObj.value, 0, 0, canvas.value.width, canvas.value.height)
+  // 確定ROI描画
+  ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+  ctx.value.drawImage(
+    imgObj.value,
+    0,
+    0,
+    canvas.value.width,
+    canvas.value.height
+  )
 
   ctx.value.strokeStyle = "lime"
   ctx.value.lineWidth = 2
@@ -125,11 +174,9 @@ const send = async () => {
 
   const data = await res.json()
 
-  // 🔢 cls個数
   counts.value.pipe = data.counts.pipe ?? 0
   counts.value.muku = data.counts.muku ?? 0
 
-  // 🖼 base64画像描画
   const img = new Image()
   img.onload = () => {
     canvas.value.width = img.width
