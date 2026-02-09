@@ -1,165 +1,200 @@
+<template>
+  <input type="file" @change="onFile" />
+  <label><input type="checkbox" v-model="Box" /> Box</label>
+  <label><input type="checkbox" v-model="Label" /> Label</label>
+  <button class="but" @click="send">推論</button>
+
+  <div style="margin-top:8px">
+    pipe: {{ counts.pipe }}　
+    muku: {{ counts.muku }}
+  </div>
+
+  <br />
+  <canvas
+    ref="canvas"
+    @mousedown="mouseDown"
+    @mousemove="mouseMove"
+    @mouseup="mouseUp"
+  ></canvas>
+</template>
+
 <script setup>
-definePageMeta({
-  ssr: false   // これがないと hydration mismatch が発生する
-})
+import { ref } from "vue"
 
-import { ref, onMounted } from "vue"
+const imageFile = ref(null)
+const canvas = ref(null)
+const ctx = ref(null)
 
-const emails = ref([])
-const name = ref("")
-const email = ref("")
-const editingId = ref(null)
+const imgObj = ref(null)
+const scale = ref(1)
 
-const apiBase = "http://localhost:5000"
+const start = ref(null)
+const roi = ref(null)
+const isDragging = ref(false)
 
-// -------------------------------
-// 初期データ読み込み
-// -------------------------------
-const loadData = async () => {
-  const res = await $fetch(`${apiBase}/emails`)
-  emails.value = res
-}
+const Box = ref(true)
+const Label = ref(true)
 
-// -------------------------------
-// 新規登録
-// -------------------------------
-const addEmail = async () => {
-  if (!name.value || !email.value) return alert("名前とメールを入れてね")
+const counts = ref({ pipe: 0, muku: 0 })
 
-  await $fetch(`${apiBase}/emails`, {
-    method: "POST",
-    body: {
-      name: name.value,
-      email: email.value,
-    },
-  })
+const MAX_SIZE = 1400
 
-  name.value = ""
-  email.value = ""
-}
+// --------------------
+// 画像読み込み
+// --------------------
+const onFile = e => {
+  imageFile.value = e.target.files[0]
+  roi.value = null
+  start.value = null
+  isDragging.value = false
 
-// -------------------------------
-// 編集開始
-// -------------------------------
-const startEdit = (item) => {
-  editingId.value = item.id
-  name.value = item.name
-  email.value = item.email
-}
+  imgObj.value = new Image()
+  imgObj.value.onload = () => {
+    const w = imgObj.value.width
+    const h = imgObj.value.height
 
-// -------------------------------
-// 更新処理
-// -------------------------------
-const updateEmail = async () => {
-  if (!editingId.value) return
+    scale.value = Math.min(MAX_SIZE / w, MAX_SIZE / h, 1)
 
-  await $fetch(`${apiBase}/emails/${editingId.value}`, {
-    method: "PUT",
-    body: {
-      name: name.value,
-      email: email.value,
-    },
-  })
+    canvas.value.width = Math.round(w * scale.value)
+    canvas.value.height = Math.round(h * scale.value)
 
-  editingId.value = null
-  name.value = ""
-  email.value = ""
-}
-
-// -------------------------------
-// 削除
-// -------------------------------
-const deleteEmail = async (id) => {
-  console.log(id)
-  if (!confirm("本当に削除しますか？")) return
-
-  await $fetch(`${apiBase}/emails/${id}`, {
-    method: "DELETE",
-  })
-}
-
-// -------------------------------
-// SSE リアルタイム反映
-// -------------------------------
-onMounted(() => {
-  loadData()
-
-  const stream = new EventSource(`${apiBase}/emails/stream`)
-
-  stream.onmessage = (event) => {
-    emails.value = JSON.parse(event.data)
+    ctx.value = canvas.value.getContext("2d")
+    ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+    ctx.value.drawImage(
+      imgObj.value,
+      0,
+      0,
+      canvas.value.width,
+      canvas.value.height
+    )
   }
-})
+
+  imgObj.value.src = URL.createObjectURL(imageFile.value)
+}
+
+// --------------------
+// ROI選択
+// --------------------
+const mouseDown = e => {
+  start.value = { x: e.offsetX, y: e.offsetY }
+  isDragging.value = true
+}
+
+const mouseMove = e => {
+  if (!isDragging.value || !start.value) return
+
+  const x1 = start.value.x
+  const y1 = start.value.y
+  const x2 = e.offsetX
+  const y2 = e.offsetY
+
+  // 元画像を描き直し
+  ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+  ctx.value.drawImage(
+    imgObj.value,
+    0,
+    0,
+    canvas.value.width,
+    canvas.value.height
+  )
+
+  // ドラッグ中ROI表示
+  ctx.value.strokeStyle = "lime"
+  ctx.value.lineWidth = 2
+  ctx.value.strokeRect(
+    Math.min(x1, x2),
+    Math.min(y1, y2),
+    Math.abs(x2 - x1),
+    Math.abs(y2 - y1)
+  )
+}
+
+const mouseUp = e => {
+  if (!start.value) return
+
+  isDragging.value = false
+
+  roi.value = {
+    x1: Math.min(start.value.x, e.offsetX),
+    y1: Math.min(start.value.y, e.offsetY),
+    x2: Math.max(start.value.x, e.offsetX),
+    y2: Math.max(start.value.y, e.offsetY)
+  }
+
+  // 確定ROI描画
+  ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+  ctx.value.drawImage(
+    imgObj.value,
+    0,
+    0,
+    canvas.value.width,
+    canvas.value.height
+  )
+
+  ctx.value.strokeStyle = "lime"
+  ctx.value.lineWidth = 2
+  ctx.value.strokeRect(
+    roi.value.x1,
+    roi.value.y1,
+    roi.value.x2 - roi.value.x1,
+    roi.value.y2 - roi.value.y1
+  )
+}
+
+// --------------------
+// 推論送信
+// --------------------
+const send = async () => {
+  if (!roi.value) {
+    alert("ROIを選択してください")
+    return
+  }
+
+  const sendRoi = {
+    x1: Math.round(roi.value.x1 / scale.value),
+    y1: Math.round(roi.value.y1 / scale.value),
+    x2: Math.round(roi.value.x2 / scale.value),
+    y2: Math.round(roi.value.y2 / scale.value)
+  }
+
+  const fd = new FormData()
+  fd.append("image", imageFile.value)
+  fd.append("x1", sendRoi.x1)
+  fd.append("y1", sendRoi.y1)
+  fd.append("x2", sendRoi.x2)
+  fd.append("y2", sendRoi.y2)
+
+  if (Box.value) fd.append("classes[]", "Box")
+  if (Label.value) fd.append("classes[]", "Label")
+
+  const res = await fetch("http://localhost:5000/predict", {
+    method: "POST",
+    body: fd
+  })
+
+  const data = await res.json()
+
+  counts.value.pipe = data.counts.pipe ?? 0
+  counts.value.muku = data.counts.muku ?? 0
+
+  const img = new Image()
+  img.onload = () => {
+    canvas.value.width = img.width
+    canvas.value.height = img.height
+    ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
+    ctx.value.drawImage(img, 0, 0)
+  }
+
+  img.src = "data:image/jpeg;base64," + data.image
+}
 </script>
 
-<template>
-  <div class="p-5">
-    <h1 class="text-4xl font-bold mb-4">リアルタイム Email 管理</h1>
-
-    <!-- 入力フォーム -->
-    <div class="border p-4 rounded mb-6">
-      <input
-        v-model="name"
-        placeholder="名前"
-        class="border p-2 mr-2"
-        type="text"
-      />
-      <input
-        v-model="email"
-        placeholder="メール"
-        class="border p-2 mr-2"
-        type="email"
-      />
-
-      <button
-        v-if="!editingId"
-        @click="addEmail"
-        class="bg-blue-500 text-white px-4 py-2 rounded ml-2"
-      >
-        追加
-      </button>
-
-      <button
-        v-else
-        @click="updateEmail"
-        class="bg-green-500 text-white px-4 py-2 rounded"
-      >
-        更新
-      </button>     
-    </div>
-
-    <!-- 一覧表示 -->
-    <table class="w-full border">
-      <thead>
-        <tr class="bg-gray-300">
-          <th class="border p-2">ID</th>
-          <th class="border p-2">名前</th>
-          <th class="border p-2">メール</th>
-          <th class="border p-2">操作</th>
-        </tr>
-      </thead>
-
-      <tbody>
-        <tr v-for="item in emails" :key="item.id">
-          <td class="border p-2">{{ item.id }}</td>
-          <td class="border p-2">{{ item.name }}</td>
-          <td class="border p-2">{{ item.email }}</td>
-          <td class="border p-2 text-center">
-            <button
-              @click="startEdit(item)"
-              class="bg-yellow-400 text-black px-3 py-1 rounded"
-            >
-              編集
-            </button>
-             <button
-                @click="deleteEmail(item.id)"
-                class="bg-red-500 text-white px-3 py-1 rounded"
-              >
-                削除
-              </button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-</template>
+<style scoped>
+.but {
+  margin-left: 6px;
+}
+canvas {
+  border: 1px solid #ccc;
+  margin-top: 8px;
+}
+</style>

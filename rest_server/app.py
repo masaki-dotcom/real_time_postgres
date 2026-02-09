@@ -1,18 +1,15 @@
-from flask import Flask, Response, request, jsonify ,send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import select
-import json
 
 import cv2
 import numpy as np
 import onnxruntime as ort
-import io
 from collections import defaultdict
 import base64
 
-
+# =====================
+# Flask
+# =====================
 app = Flask(__name__)
 CORS(app)
 
@@ -31,24 +28,60 @@ sess = ort.InferenceSession(
     providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
 )
 input_name = sess.get_inputs()[0].name
-
 print("ONNX input:", input_name)
+
 # =====================
-# 前処理
+# Ultralytics互換 letterbox
+# =====================
+def letterbox(
+    img,
+    new_shape=(1280, 1280),
+    color=(114, 114, 114),
+    scaleup=True,
+    stride=32
+):
+    shape = img.shape[:2]  # (h, w)
+
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # scale
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:
+        r = min(r, 1.0)
+
+    new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
+    dw = new_shape[1] - new_unpad[0]
+    dh = new_shape[0] - new_unpad[1]
+
+    dw /= 2
+    dh /= 2
+
+    if shape[::-1] != new_unpad:
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(
+        img, top, bottom, left, right,
+        cv2.BORDER_CONSTANT, value=color
+    )
+
+    return img, r, (dw, dh)
+
+# =====================
+# 前処理（Ultralytics互換）
 # =====================
 def preprocess(img):
-    h, w = img.shape[:2]
+    img_lb, ratio, (dw, dh) = letterbox(img, INPUT_SIZE)
 
-    img_resized = cv2.resize(img, (INPUT_SIZE, INPUT_SIZE))
-    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+    img_rgb = cv2.cvtColor(img_lb, cv2.COLOR_BGR2RGB)
     img_rgb = img_rgb.astype(np.float32) / 255.0
 
     img_chw = np.transpose(img_rgb, (2, 0, 1))
     blob = np.expand_dims(img_chw, axis=0)
 
-    return blob, w, h
-
-
+    return blob, ratio, dw, dh
 
 # =====================
 # 推論API
@@ -58,18 +91,15 @@ def predict():
 
     if "image" not in request.files:
         return jsonify({"error": "no image"}), 400
-    
-    # 表示対象クラス（Nuxtから）
+
+    # Nuxtからの表示指定
     display_classes = request.form.getlist("classes[]")
-    print("display_classes:", display_classes)
 
     # --------------------
     # 画像読み込み
     # --------------------
     file = request.files["image"]
-    img_bytes = file.read()
-
-    img_np = np.frombuffer(img_bytes, np.uint8)
+    img_np = np.frombuffer(file.read(), np.uint8)
     img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
 
     if img is None:
@@ -78,7 +108,7 @@ def predict():
     orig_h, orig_w = img.shape[:2]
 
     # --------------------
-    # ROI 座標取得
+    # ROI取得
     # --------------------
     try:
         x1 = int(request.form.get("x1"))
@@ -88,38 +118,30 @@ def predict():
     except:
         return jsonify({"error": "invalid roi"}), 400
 
-    # 座標補正
     x1, x2 = sorted([x1, x2])
     y1, y2 = sorted([y1, y2])
 
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(orig_w, x2)
-    y2 = min(orig_h, y2)
-
-    print("roi:", x1, y1, x2, y2)
+    x1 = max(0, min(x1, orig_w - 1))
+    x2 = max(0, min(x2, orig_w))
+    y1 = max(0, min(y1, orig_h - 1))
+    y2 = max(0, min(y2, orig_h))
 
     if x2 <= x1 or y2 <= y1:
         return jsonify({"error": "empty roi"}), 400
 
-    # --------------------
-    # ROI 切り出し
-    # --------------------
     roi_img = img[y1:y2, x1:x2].copy()
     roi_h, roi_w = roi_img.shape[:2]
 
     # --------------------
     # 前処理
     # --------------------
-    blob, _, _ = preprocess(roi_img)
-    scale_x = roi_w / INPUT_SIZE
-    scale_y = roi_h / INPUT_SIZE
+    blob, ratio, dw, dh = preprocess(roi_img)
 
     # --------------------
     # 推論
     # --------------------
     outputs = sess.run(None, {input_name: blob})
-    preds = outputs[0][0]   # (C, N)
+    preds = outputs[0][0]  # (C, N)
 
     boxes = []
     scores = []
@@ -135,16 +157,16 @@ def predict():
         if score < 0.3:
             continue
 
-        # ROI基準
-        x = int((xc - bw / 2) * scale_x)
-        y = int((yc - bh / 2) * scale_y)
-        w_box = int(bw * scale_x)
-        h_box = int(bh * scale_y)
+        # ★ Ultralytics互換の逆変換
+        x = (xc - bw / 2 - dw) / ratio
+        y = (yc - bh / 2 - dh) / ratio
+        w_box = bw / ratio
+        h_box = bh / ratio
 
-        x = max(0, x)
-        y = max(0, y)
-        w_box = min(roi_w - x, w_box)
-        h_box = min(roi_h - y, h_box)
+        x = int(max(0, min(x, roi_w - 1)))
+        y = int(max(0, min(y, roi_h - 1)))
+        w_box = int(min(roi_w - x, w_box))
+        h_box = int(min(roi_h - y, h_box))
 
         boxes.append([x, y, w_box, h_box])
         scores.append(score)
@@ -154,39 +176,29 @@ def predict():
     # NMS
     # --------------------
     indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        score_threshold=0.5,
-        nms_threshold=0.5
+        boxes, scores,
+        score_threshold=0.3,
+        nms_threshold=0.3
     )
 
     # --------------------
-    # 描画用画像（ROIのみ）
+    # 描画
     # --------------------
     img_draw = roi_img.copy()
-    counts = defaultdict(int)#クラスの辞書を作成
+    counts = defaultdict(int)
 
-    # --------------------
-    # 推論結果（緑box + label）
-    # --------------------
     if len(indices) > 0:
         for i in indices.flatten():
             x, y, w_box, h_box = boxes[i]
             cls = class_ids[i]
             score = scores[i]
-            #クラスの個数を辞書に変換
+
             class_name = NAMES[cls]
             counts[class_name] += 1
 
-            if cls == 0:        # pipe
-                color = (0, 0, 255)
-            elif cls == 1:      # muku
-                color = (255, 0, 0)
-            else:
-                color = (0, 255, 0)
+            color = (0, 0, 255) if cls == 0 else (255, 0, 0)
 
-            if "Box"  in display_classes:
-                #緑の検出枠
+            if "Box" in display_classes:
                 cv2.rectangle(
                     img_draw,
                     (x, y),
@@ -194,9 +206,9 @@ def predict():
                     (0, 255, 0),
                     2
                 )
-            if "Label"  in display_classes:
-                # ラベル
-                label = f"{NAMES[cls]} {score*100:.1f}%"
+
+            if "Label" in display_classes:
+                label = f"{class_name} {score*100:.1f}%"
                 cv2.putText(
                     img_draw,
                     label,
@@ -207,136 +219,24 @@ def predict():
                     2
                 )
 
-            if len(display_classes)==0:
-
-                # 中心点（●）
+            if len(display_classes) == 0:
                 cx = x + w_box // 2
                 cy = y + h_box // 2
-
-                cv2.circle(
-                    img_draw,
-                    (cx, cy),
-                    5,              # 半径（好みで3〜8）
-                    color,    # 色（緑）
-                    -1              # 塗りつぶし
-                )
+                cv2.circle(img_draw, (cx, cy), 5, color, -1)
 
     # --------------------
-    # ROI外周を赤枠で描画（最後に）
+    # 返却
     # --------------------
-    # cv2.rectangle(
-    #     img_draw,
-    #     (0, 0),
-    #     (roi_w - 1, roi_h - 1),
-    #     (0, 0, 255),  # 赤
-    #     2
-    # )
-
-
-    # --------------------
-    # 元画像サイズで返却
-    # --------------------
-    # _, buf = cv2.imencode(".jpg", img_draw)
-    # return send_file(
-    #     io.BytesIO(buf.tobytes()),
-    #     mimetype="image/jpeg"
-    # )
-    #     
     _, buf = cv2.imencode(".jpg", img_draw)
     img_base64 = base64.b64encode(buf).decode("utf-8")
 
     return jsonify({
-        "counts": counts,          # ← ★ clsごとの個数
-        "image": img_base64,       # ← ★ 表示用画像
+        "counts": counts,
+        "image": img_base64
     })
 
-
-
-def get_connection():
-    return psycopg2.connect(
-        dbname="app_01",
-        user="postgres",
-        password="tankei001",
-        host="localhost",
-        port="5432"
-    )
-
-def fetch_emails():
-    conn = get_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT * FROM emails ORDER BY id;")
-    result = cur.fetchall()
-    cur.close()
-    conn.close()
-    return result
-
-# SSE用ジェネレーター
-def event_stream():
-    conn = get_connection()
-    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-    cur = conn.cursor()
-    cur.execute("LISTEN emails_channel;")  # チャンネルを LISTEN
-
-    last_data = None
-    while True:
-        if select.select([conn],[],[],10) == ([],[],[]):  # タイムアウト10秒
-            continue
-        conn.poll()
-        while conn.notifies:
-            notify = conn.notifies.pop(0)
-            data = fetch_emails()
-            if data != last_data:
-                last_data = data
-                yield f"data: {json.dumps(data)}\n\n"
-
-@app.route('/emails')
-def get_emails():
-    return jsonify(fetch_emails())
-
-@app.route('/emails/stream')
-def stream_emails():
-    return Response(event_stream(), mimetype="text/event-stream")
-
-@app.route('/emails', methods=['POST'])
-def add_email():
-    payload = request.json
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO emails (name,email) VALUES (%s,%s)",
-        (payload['name'], payload['email'])
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"status": "ok"}), 201
-
-
-##更新
-@app.route('/emails/<int:id>', methods=['PUT'])
-def update_email(id):
-    payload = request.json
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE emails SET name=%s, email=%s WHERE id=%s",
-        (payload.get('name'), payload.get('email'), id)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"status": "ok"})
-
-#削除
-@app.route('/emails/<int:id>', methods=['DELETE'])
-def delete_email(id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM emails WHERE id=%s", (id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"status": "ok"})
-
+# =====================
+# main
+# =====================
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, threaded=True, debug=True)
