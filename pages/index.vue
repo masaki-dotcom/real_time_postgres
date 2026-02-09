@@ -39,6 +39,9 @@ const counts = ref({ pipe: 0, muku: 0 })
 
 const MAX_SIZE = 1400
 
+// ★ 推論結果用ウインドウ
+let resultWindow = null
+
 // --------------------
 // 画像読み込み
 // --------------------
@@ -83,12 +86,6 @@ const mouseDown = e => {
 const mouseMove = e => {
   if (!isDragging.value || !start.value) return
 
-  const x1 = start.value.x
-  const y1 = start.value.y
-  const x2 = e.offsetX
-  const y2 = e.offsetY
-
-  // 元画像を描き直し
   ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
   ctx.value.drawImage(
     imgObj.value,
@@ -98,14 +95,13 @@ const mouseMove = e => {
     canvas.value.height
   )
 
-  // ドラッグ中ROI表示
   ctx.value.strokeStyle = "lime"
   ctx.value.lineWidth = 2
   ctx.value.strokeRect(
-    Math.min(x1, x2),
-    Math.min(y1, y2),
-    Math.abs(x2 - x1),
-    Math.abs(y2 - y1)
+    Math.min(start.value.x, e.offsetX),
+    Math.min(start.value.y, e.offsetY),
+    Math.abs(e.offsetX - start.value.x),
+    Math.abs(e.offsetY - start.value.y)
   )
 }
 
@@ -121,7 +117,6 @@ const mouseUp = e => {
     y2: Math.max(start.value.y, e.offsetY)
   }
 
-  // 確定ROI描画
   ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
   ctx.value.drawImage(
     imgObj.value,
@@ -177,15 +172,29 @@ const send = async () => {
   counts.value.pipe = data.counts.pipe ?? 0
   counts.value.muku = data.counts.muku ?? 0
 
-  const img = new Image()
-  img.onload = () => {
-    canvas.value.width = img.width
-    canvas.value.height = img.height
-    ctx.value.clearRect(0, 0, canvas.value.width, canvas.value.height)
-    ctx.value.drawImage(img, 0, 0)
+  // --------------------
+  // ★ 別ウインドウ表示
+  // --------------------
+  if (!resultWindow || resultWindow.closed) {
+    resultWindow = window.open("", "resultWindow", "width=800,height=600")
   }
 
-  img.src = "data:image/jpeg;base64," + data.image
+  resultWindow.document.open()
+  resultWindow.document.write(`
+    <html>
+      <head>
+        <title>推論結果</title>
+        <style>
+          body { margin:0; background:#000; display:flex; justify-content:center; align-items:center; }
+          img { max-width:100%; max-height:100%; }
+        </style>
+      </head>
+      <body>
+        <img src="data:image/jpeg;base64,${data.image}" />
+      </body>
+    </html>
+  `)
+  resultWindow.document.close()
 }
 </script>
 
